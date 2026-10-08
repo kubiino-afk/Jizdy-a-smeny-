@@ -29,6 +29,9 @@ import {
   shiftOptions,
 } from './src/db';
 import type { DriverName, PassengerEntry, ShiftName } from './src/types';
+import { WORK_GROUPS, workCodeForDate, workCodeLabel, workShiftName } from './src/shiftCalendar';
+import type { WorkGroup } from './src/shiftCalendar';
+// CALENDAR+STORNO V2
 
 const PRICE_FULL = 90;
 const PRICE_HALF = 45;
@@ -43,7 +46,7 @@ const AVATARS = {
   Vorel: require('./assets/vorel.png'),
 };
 
-type Tab = 'home' | 'trips' | 'finance' | 'settings';
+type Tab = 'home' | 'week' | 'trips' | 'finance' | 'settings';
 
 type DriverStat = { actual_driver: DriverName; count: number };
 type PassengerTotal = { passenger_name: string; total: number; rides: number };
@@ -183,11 +186,14 @@ function useSettings(version: number) {
   const db = useSQLiteContext();
   const [anchorDate, setAnchorDateState] = useState('2026-10-03');
   const [anchorDriver, setAnchorDriverState] = useState<DriverName>('Já');
+  const [workGroup, setWorkGroupState] = useState<WorkGroup>('A');
 
   useEffect(() => {
     (async () => {
       setAnchorDateState(await getSetting(db, 'rotation_anchor_date', '2026-10-03'));
       setAnchorDriverState((await getSetting(db, 'rotation_anchor_driver', 'Já')) as DriverName);
+      const savedGroup = await getSetting(db, 'work_group', 'A');
+      setWorkGroupState(WORK_GROUPS.includes(savedGroup as WorkGroup) ? savedGroup as WorkGroup : 'A');
     })();
   }, [db, version]);
 
@@ -200,15 +206,20 @@ function useSettings(version: number) {
     await setSetting(db, 'rotation_anchor_driver', v);
   };
 
-  return { anchorDate, anchorDriver, saveAnchorDate, saveAnchorDriver };
+  const saveWorkGroup = async (group: WorkGroup) => {
+    setWorkGroupState(group);
+    await setSetting(db, 'work_group', group);
+  };
+  return { anchorDate, anchorDriver, saveAnchorDate, saveAnchorDriver, workGroup, saveWorkGroup };
 }
 
 function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number; refresh: () => void; onTrips: () => void; onFinance: () => void }) {
   const db = useSQLiteContext();
   const today = formatDateKey(new Date());
-  const { anchorDate, anchorDriver } = useSettings(version);
+  const { anchorDate, anchorDriver, workGroup } = useSettings(version);
   const shifts = shiftOptions(today);
-  const [shift, setShift] = useState<ShiftName>(shifts[0]);
+  const calendarShift = workShiftName(workCodeForDate(today, workGroup), today);
+  const [shift, setShift] = useState<ShiftName>(calendarShift ?? shifts[0]);
   const [actualDriver, setActualDriver] = useState<DriverName>('Já');
   const [confirmedDriver, setConfirmedDriver] = useState<DriverName | null>(null);
   const [driverStats, setDriverStats] = useState<Record<DriverName, number>>({ 'Já': 0, Tade: 0, Fany: 0 });
@@ -221,8 +232,8 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
   const plan = useMemo(() => plannedDriver(today, anchorDate, anchorDriver), [today, anchorDate, anchorDriver]);
 
   useEffect(() => {
-    if (!shiftOptions(today).includes(shift)) setShift(shiftOptions(today)[0]);
-  }, [today]);
+    setShift(calendarShift ?? shifts[0]);
+  }, [today, workGroup]);
 
   useEffect(() => {
     let active = true;
@@ -251,7 +262,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
     const ps = await db.getAllAsync<PassengerTotal>(
       `SELECT passenger_name, SUM(amount) as total, SUM(fraction) as rides
        FROM passenger_entries
-       WHERE substr(date,1,7)=? AND passenger_name IN ('Hanes','Vorel')
+       WHERE substr(date,1,7)=? AND is_cancelled=0 AND passenger_name IN ('Hanes','Vorel')
        GROUP BY passenger_name`,
       currentMonth
     );
@@ -264,7 +275,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
     for (const name of ['Hanes', 'Vorel']) {
       const last = await db.getFirstAsync<{ created_at: string }>(
         `SELECT created_at FROM passenger_entries
-         WHERE passenger_name=? AND is_retro=0 AND is_guest=0
+         WHERE passenger_name=? AND is_retro=0 AND is_guest=0 AND is_cancelled=0
          ORDER BY datetime(created_at) DESC LIMIT 1`,
         name
       );
@@ -344,7 +355,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
       <GlassCard>
         <View style={styles.heroRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.sectionEyebrow}>DNES</Text>
+            <Text style={styles.sectionEyebrow}>DNES · SKUPINA {workGroup} · {workCodeLabel(workCodeForDate(today, workGroup))}</Text>
             <Text style={styles.heroTitle}>{shift}</Text>
             <View style={styles.lineItem}><Text style={styles.lineIcon}>👤</Text><Text style={styles.lineLabel}>Má řídit:</Text><Text style={styles.lineValue}>{plan}</Text></View>
             <View style={styles.lineItem}><Text style={styles.lineIcon}>🚘</Text><Text style={styles.lineLabel}>Řídí:</Text><Text style={[styles.lineValue, { color: '#9af1ad' }]}>{actualDriver}</Text></View>
@@ -453,6 +464,9 @@ function TripsScreen({ version, refresh }: { version: number; refresh: () => voi
   const [retroFraction, setRetroFraction] = useState(1);
   const [guestName, setGuestName] = useState('');
   const [retroSaving, setRetroSaving] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<PassengerEntry | null>(null);
+  const [editAmount, setEditAmount] = useState<0 | 45 | 90>(90);
+  const [editSaving, setEditSaving] = useState(false);
   const plan = plannedDriver(dateKey, anchorDate, anchorDriver);
 
   useEffect(() => {
@@ -484,8 +498,8 @@ function TripsScreen({ version, refresh }: { version: number; refresh: () => voi
     (async () => {
       const rows = await db.getAllAsync<MonthlyShift>(
         `SELECT days.date, days.shift, d.actual_driver,
-                COUNT(p.id) AS passenger_count,
-                COALESCE(SUM(p.amount), 0) AS total
+                SUM(CASE WHEN p.is_cancelled=0 THEN 1 ELSE 0 END) AS passenger_count,
+                COALESCE(SUM(CASE WHEN p.is_cancelled=0 THEN p.amount ELSE 0 END), 0) AS total
          FROM (
            SELECT date,shift FROM drives WHERE substr(date,1,7)=?
            UNION
@@ -539,6 +553,74 @@ function TripsScreen({ version, refresh }: { version: number; refresh: () => voi
     finally { setRetroSaving(false); }
   };
 
+  const saveRideEdit = async () => {
+    if (!editingEntry || editSaving || editingEntry.is_cancelled) return;
+    setEditSaving(true);
+    try {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        const existing = await tx.getFirstAsync<PassengerEntry>(
+          'SELECT * FROM passenger_entries WHERE id=? AND is_cancelled=0', editingEntry.id);
+        if (!existing) throw new Error('Zápis byl mezitím stornován.');
+        const result = await tx.runAsync(
+          'UPDATE passenger_entries SET amount=?, fraction=? WHERE id=? AND is_cancelled=0',
+          editAmount, editAmount / PRICE_FULL, editingEntry.id);
+        if (result.changes !== 1) throw new Error('Zápis se nepodařilo upravit.');
+        await tx.runAsync(
+          'INSERT INTO change_log(category,reference,action,old_value,new_value,created_at) VALUES(?,?,?,?,?,?)',
+          'passenger', String(editingEntry.id), 'price_edit', String(existing.amount), String(editAmount), new Date().toISOString());
+      });
+      setEditingEntry(null);
+      refresh();
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } catch { Alert.alert('Úprava jízdného', 'Změnu se nepodařilo uložit.'); }
+    finally { setEditSaving(false); }
+  };
+
+  const cancelRide = (entry: PassengerEntry) => {
+    if (entry.is_cancelled) return;
+    Alert.alert('Stornovat chybný zápis?',
+      `${entry.passenger_name} · ${formatMoney(entry.amount)}. Zápis zůstane v historii, ale odečte se ze statistik.`, [
+      { text: 'Ponechat', style: 'cancel' },
+      { text: 'Stornovat', style: 'destructive', onPress: async () => {
+        try {
+          await db.withExclusiveTransactionAsync(async (tx) => {
+            const original = await tx.getFirstAsync<PassengerEntry>(
+              'SELECT * FROM passenger_entries WHERE id=? AND is_cancelled=0', entry.id);
+            if (!original) throw new Error('Záznam neexistuje nebo je již stornovaný.');
+            const result = await tx.runAsync(
+              'UPDATE passenger_entries SET is_cancelled=1, cancelled_at=? WHERE id=? AND is_cancelled=0',
+              new Date().toISOString(), entry.id);
+            if (result.changes !== 1) throw new Error('Storno neproběhlo.');
+            await tx.runAsync(
+              'INSERT INTO change_log(category,reference,action,old_value,new_value,created_at) VALUES(?,?,?,?,?,?)',
+              'passenger', String(entry.id), 'cancel', String(original.amount), 'cancelled', new Date().toISOString());
+          });
+          setEditingEntry(null);
+          refresh();
+        } catch { Alert.alert('Storno se nepodařilo', 'Záznam nebylo možné stornovat.'); }
+      } },
+    ]);
+  };
+
+  const cancelDrive = () => {
+    if (!actual) return;
+    Alert.alert('Zrušit potvrzeného řidiče?',
+      `Zrušit ${actual} pro ${czDate(dateKey)} · ${shift}? Platby cestujících zůstanou beze změny.`, [
+      { text: 'Ponechat', style: 'cancel' },
+      { text: 'Zrušit potvrzení', style: 'destructive', onPress: async () => {
+        try {
+          await db.withExclusiveTransactionAsync(async (tx) => {
+            await tx.runAsync(
+              'INSERT INTO change_log(category,reference,action,old_value,new_value,created_at) VALUES(?,?,?,?,?,?)',
+              'drive', `${dateKey}:${shift}`, 'cancel', actual, 'cancelled', new Date().toISOString());
+            await tx.runAsync('DELETE FROM drives WHERE date=? AND shift=?', dateKey, shift);
+          });
+          setActual(null); refresh();
+        } catch { Alert.alert('Zrušení řidiče', 'Potvrzení se nepodařilo zrušit.'); }
+      } },
+    ]);
+  };
+
   const openDay = (date: string, selectedShift: ShiftName) => {
     setDateKey(date);
     setShift(selectedShift);
@@ -588,14 +670,21 @@ function TripsScreen({ version, refresh }: { version: number; refresh: () => voi
           <View style={styles.infoRow}><Text style={styles.lineLabel}>Skutečně řídil</Text><Text style={[styles.infoValue, { color: actual ? '#9af1ad' : '#969aa0' }]}>{actual ?? 'Nepotvrzeno'}</Text></View>
           <SegmentedDrivers value={driverChoice} onChange={setDriverChoice} />
           <CopperButton label="Uložit skutečného řidiče" onPress={saveDriver} disabled={actual === driverChoice} />
+          {actual && <Pressable onPress={cancelDrive} style={styles.cancelTextButton}>
+            <Text style={styles.cancelText}>✕ Zrušit chybně potvrzeného řidiče</Text>
+          </Pressable>}
         </GlassCard>
         <GlassCard>
           <View style={styles.cardHeader}><Text style={styles.cardTitle}>Cestující</Text><Pressable onPress={() => setRetroOpen(true)}><Text style={styles.textLink}>＋ Zpětný zápis</Text></Pressable></View>
           {entries.length === 0 ? <Text style={styles.emptyText}>Pro tuto směnu zatím není žádný záznam.</Text> : entries.map((e) => (
-            <View key={e.id} style={styles.entryRow}>
-              <View><Text style={styles.entryName}>{e.passenger_name}</Text><Text style={styles.mutedMini}>{e.is_retro ? 'zpětně · ' : ''}{e.fraction === 1 ? 'celá jízda' : 'půl jízdy'}</Text></View>
-              <Text style={styles.entryMoney}>{formatMoney(e.amount)}</Text>
-            </View>
+            <Pressable key={e.id} onPress={() => { if (!e.is_cancelled) { setEditingEntry(e); setEditAmount(e.amount === 90 ? 90 : e.amount === 45 ? 45 : 0); } }}
+              style={[styles.entryRow, e.is_cancelled ? { opacity: 0.5 } : null]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.entryName, e.is_cancelled ? { textDecorationLine: 'line-through' as const } : null]}>{e.passenger_name}</Text>
+                <Text style={styles.mutedMini}>{e.is_cancelled ? 'STORNOVÁNO · nezapočítává se' : e.is_retro ? 'Zpětně · klepni pro úpravu' : 'Klepni pro úpravu či storno'}{!e.is_cancelled ? ` · ${e.amount === 0 ? 'zdarma' : e.fraction === 1 ? 'celá jízda' : 'půl jízdy'}` : ''}</Text>
+              </View>
+              <Text style={styles.entryMoney}>{e.is_cancelled ? 'Storno' : formatMoney(e.amount)}</Text>
+            </Pressable>
           ))}
         </GlassCard>
       </> : <>
@@ -630,10 +719,33 @@ function TripsScreen({ version, refresh }: { version: number; refresh: () => voi
           <View style={styles.segmentRow}>
             <Pressable onPress={() => setRetroFraction(1)} style={[styles.segment, retroFraction === 1 && styles.segmentActive]}><Text style={styles.segmentText}>90 Kč</Text></Pressable>
             <Pressable onPress={() => setRetroFraction(0.5)} style={[styles.segment, retroFraction === 0.5 && styles.segmentActive]}><Text style={styles.segmentText}>45 Kč</Text></Pressable>
+            <Pressable onPress={() => setRetroFraction(0)} style={[styles.segment, retroFraction === 0 && styles.segmentActive]}><Text style={styles.segmentText}>0 Kč</Text></Pressable>
           </View>
           <View style={styles.modalActions}>
             <View style={styles.modalPrimaryAction}><CopperButton label={retroSaving ? 'Ukládám…' : 'Uložit zpětně'} onPress={saveRetro} compact disabled={retroSaving} /></View>
             <Pressable disabled={retroSaving} onPress={() => setRetroOpen(false)} style={styles.modalCancelAction}><Text style={styles.closeLinkText}>Zrušit</Text></Pressable>
+          </View>
+        </GlassCard></View>
+      </Modal>
+
+      <Modal visible={editingEntry !== null} transparent animationType="fade" onRequestClose={() => setEditingEntry(null)}>
+        <View style={styles.modalShade}><GlassCard style={styles.modalCard}>
+          <Text style={styles.cardTitle}>Upravit jízdu · {editingEntry?.passenger_name}</Text>
+          <Text style={styles.smallLabel}>{czDate(dateKey)} · {shift}</Text>
+          <View style={styles.segmentRow}>
+            {([90, 45, 0] as const).map((amount) => (
+              <Pressable key={amount} onPress={() => setEditAmount(amount)}
+                style={[styles.segment, editAmount === amount && styles.segmentActive]}>
+                <Text style={[styles.segmentText, editAmount === amount && styles.activeSegmentText]}>{amount} Kč</Text>
+              </Pressable>
+            ))}
+          </View>
+          <View style={styles.modalActions}>
+            <View style={styles.modalPrimaryAction}><CopperButton label={editSaving ? 'Ukládám…' : 'Uložit opravu'} onPress={saveRideEdit} compact disabled={editSaving} /></View>
+            <Pressable disabled={editSaving} style={styles.modalCancelAction} onPress={() => { const entry = editingEntry; if (entry) cancelRide(entry); }}>
+              <Text style={styles.cancelText}>✕ Stornovat chybný zápis</Text>
+            </Pressable>
+            <Pressable disabled={editSaving} style={styles.modalCancelAction} onPress={() => setEditingEntry(null)}><Text style={styles.closeLinkText}>Zavřít bez změn</Text></Pressable>
           </View>
         </GlassCard></View>
       </Modal>
@@ -664,7 +776,7 @@ function FinanceScreen({ version }: { version: number }) {
   useEffect(() => {
     (async () => {
       setPassengers(await db.getAllAsync<PassengerTotal>(
-        `SELECT passenger_name,SUM(amount) as total,SUM(fraction) as rides FROM passenger_entries WHERE substr(date,1,7)=? GROUP BY passenger_name ORDER BY total DESC`, selected
+        `SELECT passenger_name,SUM(amount) as total,SUM(fraction) as rides FROM passenger_entries WHERE substr(date,1,7)=? AND is_cancelled=0 GROUP BY passenger_name ORDER BY total DESC`, selected
       ));
       setDrivers(await db.getAllAsync<DriverStat>(
         `SELECT actual_driver,COUNT(*) as count FROM drives WHERE substr(date,1,7)=? GROUP BY actual_driver`, selected
@@ -696,8 +808,132 @@ function FinanceScreen({ version }: { version: number }) {
   );
 }
 
+function WeekScreen({ version, refresh }: { version: number; refresh: () => void }) {
+  const db = useSQLiteContext();
+  const { anchorDate, anchorDriver, workGroup, saveWorkGroup } = useSettings(version);
+  const [offset, setOffset] = useState(0);
+  const [plans, setPlans] = useState<Record<string, DriverName>>({});
+  const [confirmed, setConfirmed] = useState<Record<string, DriverName>>({});
+  const [dayOpen, setDayOpen] = useState<string | null>(null);
+  const [chosen, setChosen] = useState<DriverName>('Já');
+  const [saving, setSaving] = useState(false);
+  const weekStart = useMemo(() => {
+    const current = new Date();
+    current.setHours(12, 0, 0, 0);
+    current.setDate(current.getDate() - (current.getDay() + 6) % 7 + offset * 7);
+    return formatDateKey(current);
+  }, [offset]);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const lastDay = days[6];
+  const loadWeek = async () => {
+    const planned = await db.getAllAsync<{ date: string; driver: DriverName }>(
+      'SELECT date,driver FROM weekly_driver_plans WHERE work_group=? AND date>=? AND date<=?', workGroup, weekStart, lastDay);
+    const real = await db.getAllAsync<{ date: string; shift: ShiftName; actual_driver: DriverName }>(
+      'SELECT date,shift,actual_driver FROM drives WHERE date>=? AND date<=?', weekStart, lastDay);
+    const nextPlans: Record<string, DriverName> = {};
+    const nextConfirmed: Record<string, DriverName> = {};
+    planned.forEach((item) => { nextPlans[item.date] = item.driver; });
+    real.forEach((item) => {
+      if (item.shift === workShiftName(workCodeForDate(item.date, workGroup), item.date))
+        nextConfirmed[item.date] = item.actual_driver;
+    });
+    setPlans(nextPlans);
+    setConfirmed(nextConfirmed);
+  };
+  useEffect(() => { loadWeek().catch(() => Alert.alert('Kalendář', 'Týdenní plán nelze načíst.')); }, [version, workGroup, weekStart]);
+  const chooseDay = (day: string) => {
+    if (workCodeForDate(day, workGroup) === 'V') return;
+    setChosen(plans[day] ?? confirmed[day] ?? plannedDriver(day, anchorDate, anchorDriver));
+    setDayOpen(dayOpen === day ? null : day);
+  };
+  const savePlan = async (day: string, confirm: boolean) => {
+    if (saving) return;
+    const code = workCodeForDate(day, workGroup);
+    const shift = workShiftName(code, day);
+    if (!shift) return;
+    setSaving(true);
+    try {
+      await db.runAsync(
+        `INSERT INTO weekly_driver_plans(date,work_group,driver,updated_at) VALUES(?,?,?,?)
+         ON CONFLICT(date,work_group) DO UPDATE SET driver=excluded.driver,updated_at=excluded.updated_at`,
+        day, workGroup, chosen, new Date().toISOString());
+      if (confirm) {
+        const rotationDriver = plannedDriver(day, anchorDate, anchorDriver);
+        await db.runAsync(
+          `INSERT INTO drives(date,shift,planned_driver,actual_driver,created_at) VALUES(?,?,?,?,?)
+           ON CONFLICT(date,shift) DO UPDATE SET actual_driver=excluded.actual_driver,planned_driver=excluded.planned_driver,created_at=excluded.created_at`,
+          day, shift, rotationDriver, chosen, new Date().toISOString());
+      }
+      refresh();
+    } catch { Alert.alert('Plán týdne', 'Záznam se nepodařilo uložit.'); }
+    finally { setSaving(false); }
+  };
+  return (
+    <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
+      <Text style={styles.bigTitle}>Plán týdne</Text>
+      <Text style={styles.subtitle}>Continental Barum s.r.o. · Otrokovice</Text>
+      <GlassCard>
+        <Text style={styles.cardTitle}>Pracovní skupina</Text>
+        <View style={[styles.segmentRow, { marginTop: 12 }]}>
+          {WORK_GROUPS.map((group) => (
+            <Pressable key={group} style={[styles.segment, workGroup === group && styles.segmentActive]}
+              onPress={async () => { setDayOpen(null); await saveWorkGroup(group); refresh(); }}>
+              <Text style={[styles.segmentText, workGroup === group && styles.activeSegmentText]}>{group}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.archiveNote}>Pravidelný 28denní cyklus od 5. 10. 2026, bez osobních přesčasů. Lze procházet i několik let dopředu.</Text>
+        <View style={[styles.dateNav, { marginTop: 12 }]}>
+          <Pressable style={styles.navRound} onPress={() => { setOffset(offset - 1); setDayOpen(null); }}><Text style={styles.navRoundText}>‹</Text></Pressable>
+          <View style={{ alignItems: 'center', flexShrink: 1 }}>
+            <Text style={[styles.heroTitle, { fontSize: 19 }]}>Týden {czDate(weekStart, false)}</Text>
+            <Text style={styles.mutedMini}>{czDate(weekStart)} až {czDate(lastDay)}</Text>
+          </View>
+          <Pressable style={styles.navRound} onPress={() => { setOffset(offset + 1); setDayOpen(null); }}><Text style={styles.navRoundText}>›</Text></Pressable>
+        </View>
+        <Pressable onPress={() => { setOffset(0); setDayOpen(null); }} style={styles.cancelTextButton}><Text style={styles.textLink}>Přejít na aktuální týden</Text></Pressable>
+      </GlassCard>
+      <GlassCard>
+        <Text style={styles.cardTitle}>Směny a řidiči</Text>
+        {days.map((day) => {
+          const code = workCodeForDate(day, workGroup);
+          const isFree = code === 'V';
+          const isSaturday = parseDateKey(day).getDay() === 6;
+          const suggested = plans[day] ?? plannedDriver(day, anchorDate, anchorDriver);
+          const driver = confirmed[day];
+          return (
+            <View key={day}>
+              <Pressable onPress={() => chooseDay(day)} style={styles.monthTripRow}>
+                <View style={[styles.calendarCode, code === 'R' ? styles.codeMorning : code === 'O' ? styles.codeAfternoon : code === 'N' ? styles.codeNight : styles.codeFree]}>
+                  <Text style={styles.calendarCodeText}>{isFree ? '–' : code}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.entryName}>{czDate(day)} · {workCodeLabel(code)}{isSaturday && !isFree ? ' · 12 h' : ''}</Text>
+                  <Text style={styles.mutedMini}>{isFree ? 'Volno, bez plánované jízdy' : driver ? `✓ Odřídil: ${driver}` : `Plánovaný řidič: ${suggested}`}</Text>
+                </View>
+                {!isFree && <Text style={styles.routeArrowSmall}>›</Text>}
+              </Pressable>
+              {dayOpen === day && !isFree && (
+                <View style={styles.calendarDayPanel}>
+                  <Text style={styles.smallLabel}>Skutečný / plánovaný řidič</Text>
+                  <SegmentedDrivers value={chosen} onChange={setChosen} />
+                  <View style={[styles.actionRow, { marginTop: 10 }]}>
+                    <CopperButton label="Uložit plán" onPress={() => savePlan(day, false)} disabled={saving} compact />
+                    <CopperButton label="✓ Potvrdit jízdu" onPress={() => savePlan(day, true)} disabled={saving || (driver === chosen)} compact />
+                  </View>
+                  <Text style={styles.archiveNote}>Potvrzení započítá odřízenou směnu do férovosti řidičů. Pouhé plánování ji nezapočítá.</Text>
+                </View>
+              )}
+            </View>
+          );
+        })}
+      </GlassCard>
+    </ScrollView>
+  );
+}
+
 function SettingsScreen({ version, refresh }: { version: number; refresh: () => void }) {
-  const { anchorDate, anchorDriver, saveAnchorDate, saveAnchorDriver } = useSettings(version);
+  const { anchorDate, anchorDriver, saveAnchorDate, saveAnchorDriver, workGroup, saveWorkGroup } = useSettings(version);
   const [dateDraft, setDateDraft] = useState(anchorDate);
   useEffect(() => setDateDraft(anchorDate), [anchorDate]);
 
@@ -720,6 +956,14 @@ function SettingsScreen({ version, refresh }: { version: number; refresh: () => 
         <Text style={styles.archiveNote}>Rotace běží po 7 dnech: Já → Tade → Fany → Já. Skutečné řízení se počítá zvlášť až po potvrzení směny.</Text>
       </GlassCard>
       <GlassCard>
+        <Text style={styles.cardTitle}>Continental Barum · pracovní skupina</Text>
+        <View style={[styles.segmentRow, { marginTop: 12 }]}>
+          {WORK_GROUPS.map((group) => <Pressable key={group} style={[styles.segment, workGroup === group && styles.segmentActive]}
+            onPress={async () => { await saveWorkGroup(group); refresh(); }}><Text style={styles.segmentText}>{group}</Text></Pressable>)}
+        </View>
+        <Text style={styles.archiveNote}>Skupinu lze změnit také na kartě Plán týdne. Přesčasy se do automatické rotace nepropíšou.</Text>
+      </GlassCard>
+      <GlassCard>
         <Text style={styles.cardTitle}>Úložiště</Text>
         <Text style={styles.archiveNote}>Záznamy jsou ukládány lokálně v SQLite databázi aplikace a zůstávají po zavření i restartu. Později doplníme export/import zálohy.</Text>
       </GlassCard>
@@ -730,6 +974,7 @@ function SettingsScreen({ version, refresh }: { version: number; refresh: () => 
 function BottomDock({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
   const items: { tab: Tab; icon: string; label: string }[] = [
     { tab: 'home', icon: '⌂', label: 'Domů' },
+    { tab: 'week', icon: '▦', label: 'Týden' },
     { tab: 'trips', icon: '▣', label: 'Jízdy' },
     { tab: 'finance', icon: '▥', label: 'Finance' },
     { tab: 'settings', icon: '⚙', label: 'Nastavení' },
@@ -759,6 +1004,7 @@ function MainApp() {
       <AppBackground />
       <View style={{ flex: 1, paddingTop: insets.top }}>
         {tab === 'home' && <HomeScreen version={version} refresh={refresh} onTrips={() => setTab('trips')} onFinance={() => setTab('finance')} />}
+        {tab === 'week' && <WeekScreen version={version} refresh={refresh} />}
         {tab === 'trips' && <TripsScreen version={version} refresh={refresh} />}
         {tab === 'finance' && <FinanceScreen version={version} />}
         {tab === 'settings' && <SettingsScreen version={version} refresh={refresh} />}
@@ -780,6 +1026,16 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#080a0d' },
+  cancelTextButton: { alignItems: 'center', justifyContent: 'center', paddingVertical: 13 },
+  cancelText: { color: '#ff938d', fontWeight: '700', fontSize: 13 },
+  calendarCode: { width: 41, height: 39, borderRadius: 9, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  calendarCodeText: { color: '#fff', fontSize: 16, fontWeight: '900' },
+  codeMorning: { backgroundColor: '#d8a044' },
+  codeAfternoon: { backgroundColor: '#267ac4' },
+  codeNight: { backgroundColor: '#42245f' },
+  codeFree: { backgroundColor: '#31373c' },
+  routeArrowSmall: { color: '#ffbb88', fontSize: 26 },
+  calendarDayPanel: { padding: 12, backgroundColor: 'rgba(255,126,50,0.08)', borderWidth: 1, borderColor: 'rgba(255,126,50,0.25)', borderRadius: 15, marginTop: 5 },
   driverWheelWrap: { width: 124, alignItems: 'center', justifyContent: 'center', paddingVertical: 3 },
   driverWheelRing: { width: 112, height: 112, borderRadius: 56, borderWidth: 5, borderColor: '#a36b43', alignItems: 'center', justifyContent: 'center', backgroundColor: '#11141a', shadowColor: '#ff843b', shadowOpacity: 0.5, shadowRadius: 12 },
   driverWheelCheck: { position: 'absolute', right: -2, bottom: -2, width: 27, height: 27, borderRadius: 14, backgroundColor: '#368456', borderWidth: 2, borderColor: '#c3efd0', justifyContent: 'center', alignItems: 'center' },

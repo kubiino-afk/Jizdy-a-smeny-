@@ -20,5 +20,7 @@ export type PassengerEntry = {
   amount: number;
   is_guest: number;
   is_retro: number;
+  is_cancelled: number;
+  cancelled_at: string | null;
   created_at: string;
 };
