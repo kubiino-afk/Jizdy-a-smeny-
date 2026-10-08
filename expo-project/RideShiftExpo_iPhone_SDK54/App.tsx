@@ -48,6 +48,15 @@ type Tab = 'home' | 'trips' | 'finance' | 'settings';
 type DriverStat = { actual_driver: DriverName; count: number };
 type PassengerTotal = { passenger_name: string; total: number; rides: number };
 type MonthRow = { month: string };
+// UI UPGRADE: driver-avatar + monthly trips + modal actions (2026-10-08)
+type HistoryMode = 'day' | 'month';
+type MonthlyShift = {
+  date: string;
+  shift: ShiftName;
+  actual_driver: DriverName | null;
+  passenger_count: number;
+  total: number;
+};
 
 function czDate(dateKey: string, withYear = true) {
   const d = parseDateKey(dateKey);
@@ -69,6 +78,12 @@ function addDays(key: string, amount: number) {
   const d = parseDateKey(key);
   d.setDate(d.getDate() + amount);
   return formatDateKey(d);
+}
+
+function shiftMonth(key: string, amount: number) {
+  const [y, m] = key.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + amount, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 function formatMoney(n: number) {
@@ -137,14 +152,17 @@ function AppBackground() {
   );
 }
 
-function SteeringWheel() {
+function SteeringWheel({ driver, confirmed }: { driver: DriverName; confirmed: boolean }) {
+  const colors: Record<DriverName, string> = { 'Já': '#4c9cff', Tade: '#ff843b', Fany: '#9a61ff' };
   return (
-    <View style={styles.wheel}>
-      <View style={styles.wheelInner} />
-      <View style={[styles.spoke, { transform: [{ rotate: '0deg' }] }]} />
-      <View style={[styles.spoke, { transform: [{ rotate: '120deg' }] }]} />
-      <View style={[styles.spoke, { transform: [{ rotate: '240deg' }] }]} />
-      <View style={styles.wheelHub} />
+    <View style={styles.driverWheelWrap} accessibilityLabel={`Vybraný řidič: ${driver}${confirmed ? ', potvrzeno' : ', nepotvrzeno'}`}>
+      <View style={styles.driverWheelRing}>
+        <Avatar name={driver} size={84} accent={colors[driver]} />
+        {confirmed && <View style={styles.driverWheelCheck}><Text style={styles.driverWheelCheckText}>✓</Text></View>}
+      </View>
+      <Text style={[styles.driverWheelStatus, confirmed && styles.driverWheelStatusConfirmed]}>
+        {confirmed ? 'POTVRZENO' : 'VYBRANÝ ŘIDIČ'}
+      </Text>
     </View>
   );
 }
@@ -192,6 +210,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
   const shifts = shiftOptions(today);
   const [shift, setShift] = useState<ShiftName>(shifts[0]);
   const [actualDriver, setActualDriver] = useState<DriverName>('Já');
+  const [confirmedDriver, setConfirmedDriver] = useState<DriverName | null>(null);
   const [driverStats, setDriverStats] = useState<Record<DriverName, number>>({ 'Já': 0, Tade: 0, Fany: 0 });
   const [passengerTotals, setPassengerTotals] = useState<Record<string, number>>({ Hanes: 0, Vorel: 0 });
   const [locks, setLocks] = useState<Record<string, number>>({ Hanes: 0, Vorel: 0 });
@@ -206,8 +225,18 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
   }, [today]);
 
   useEffect(() => {
-    setActualDriver(plan);
-  }, [plan, shift]);
+    let active = true;
+    (async () => {
+      const recorded = await db.getFirstAsync<{ actual_driver: DriverName }>(
+        'SELECT actual_driver FROM drives WHERE date=? AND shift=?', today, shift
+      );
+      if (active) {
+        setConfirmedDriver(recorded?.actual_driver ?? null);
+        setActualDriver(recorded?.actual_driver ?? plan);
+      }
+    })().catch(() => { if (active) setConfirmedDriver(null); });
+    return () => { active = false; };
+  }, [db, today, shift, plan, version]);
 
   const load = async () => {
     const currentMonth = monthKey(today);
@@ -258,6 +287,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
        ON CONFLICT(date,shift) DO UPDATE SET planned_driver=excluded.planned_driver, actual_driver=excluded.actual_driver, created_at=excluded.created_at`,
       today, shift, plan, actualDriver, new Date().toISOString()
     );
+    setConfirmedDriver(actualDriver);
     refresh();
   };
 
@@ -320,7 +350,7 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
             <View style={styles.lineItem}><Text style={styles.lineIcon}>🚘</Text><Text style={styles.lineLabel}>Řídí:</Text><Text style={[styles.lineValue, { color: '#9af1ad' }]}>{actualDriver}</Text></View>
             <Text style={styles.rotationText}>Cyklus řidičů:  Já · Tade · Fany</Text>
           </View>
-          <SteeringWheel />
+          <SteeringWheel driver={actualDriver} confirmed={confirmedDriver === actualDriver} />
         </View>
         <View style={styles.shiftRow}>
           {shifts.map((s) => (
@@ -331,7 +361,11 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
         </View>
         <Text style={styles.smallLabel}>Skutečný řidič</Text>
         <SegmentedDrivers value={actualDriver} onChange={setActualDriver} />
-        <CopperButton label="✓ Potvrdit odřízenou směnu" onPress={confirmDrive} />
+        <CopperButton
+          label={confirmedDriver === actualDriver ? '✓ Směna potvrzena' : '✓ Potvrdit odřízenou směnu'}
+          onPress={confirmDrive}
+          disabled={confirmedDriver === actualDriver}
+        />
       </GlassCard>
 
       <GlassCard>
@@ -392,8 +426,10 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
               <Pressable style={[styles.segment, guestFraction === 1 && styles.segmentActive]} onPress={() => setGuestFraction(1)}><Text style={styles.segmentText}>Celá · 90 Kč</Text></Pressable>
               <Pressable style={[styles.segment, guestFraction === 0.5 && styles.segmentActive]} onPress={() => setGuestFraction(0.5)}><Text style={styles.segmentText}>Půl · 45 Kč</Text></Pressable>
             </View>
-            <CopperButton label="Přidat cestujícího" onPress={addGuest} />
-            <Pressable onPress={() => setGuestOpen(false)} style={styles.closeLink}><Text style={styles.closeLinkText}>Zrušit</Text></Pressable>
+            <View style={styles.modalActions}>
+              <View style={styles.modalPrimaryAction}><CopperButton label="Přidat cestujícího" onPress={addGuest} compact /></View>
+              <Pressable onPress={() => setGuestOpen(false)} style={styles.modalCancelAction}><Text style={styles.closeLinkText}>Zrušit</Text></Pressable>
+            </View>
           </GlassCard>
         </View>
       </Modal>
@@ -404,93 +440,201 @@ function HomeScreen({ version, refresh, onTrips, onFinance }: { version: number;
 function TripsScreen({ version, refresh }: { version: number; refresh: () => void }) {
   const db = useSQLiteContext();
   const { anchorDate, anchorDriver } = useSettings(version);
+  const [mode, setMode] = useState<HistoryMode>('day');
   const [dateKey, setDateKey] = useState(formatDateKey(new Date()));
+  const [selectedMonth, setSelectedMonth] = useState(monthKey(formatDateKey(new Date())));
   const [shift, setShift] = useState<ShiftName>(shiftOptions(dateKey)[0]);
   const [entries, setEntries] = useState<PassengerEntry[]>([]);
+  const [monthlyShifts, setMonthlyShifts] = useState<MonthlyShift[]>([]);
   const [actual, setActual] = useState<DriverName | null>(null);
   const [driverChoice, setDriverChoice] = useState<DriverName>('Já');
   const [retroOpen, setRetroOpen] = useState(false);
   const [retroPassenger, setRetroPassenger] = useState('Hanes');
   const [retroFraction, setRetroFraction] = useState(1);
   const [guestName, setGuestName] = useState('');
-
+  const [retroSaving, setRetroSaving] = useState(false);
   const plan = plannedDriver(dateKey, anchorDate, anchorDriver);
 
   useEffect(() => {
     const valid = shiftOptions(dateKey);
     if (!valid.includes(shift)) setShift(valid[0]);
-  }, [dateKey]);
+  }, [dateKey, shift]);
 
-  const load = async () => {
-    const r = await db.getFirstAsync<{ actual_driver: DriverName }>('SELECT actual_driver FROM drives WHERE date=? AND shift=?', dateKey, shift);
-    setActual(r?.actual_driver ?? null);
-    setDriverChoice(r?.actual_driver ?? plan);
-    const es = await db.getAllAsync<PassengerEntry>('SELECT * FROM passenger_entries WHERE date=? AND shift=? ORDER BY id DESC', dateKey, shift);
-    setEntries(es);
-  };
-  useEffect(() => { load(); }, [version, dateKey, shift, plan]);
+  useEffect(() => {
+    if (mode !== 'day') return;
+    let active = true;
+    (async () => {
+      const r = await db.getFirstAsync<{ actual_driver: DriverName }>(
+        'SELECT actual_driver FROM drives WHERE date=? AND shift=?', dateKey, shift
+      );
+      const es = await db.getAllAsync<PassengerEntry>(
+        'SELECT * FROM passenger_entries WHERE date=? AND shift=? ORDER BY id DESC', dateKey, shift
+      );
+      if (!active) return;
+      setActual(r?.actual_driver ?? null);
+      setDriverChoice(r?.actual_driver ?? plan);
+      setEntries(es);
+    })().catch(() => { if (active) Alert.alert('Načítání jízd', 'Záznamy se nepodařilo načíst.'); });
+    return () => { active = false; };
+  }, [db, version, dateKey, shift, plan, mode]);
+
+  useEffect(() => {
+    if (mode !== 'month') return;
+    let active = true;
+    (async () => {
+      const rows = await db.getAllAsync<MonthlyShift>(
+        `SELECT days.date, days.shift, d.actual_driver,
+                COUNT(p.id) AS passenger_count,
+                COALESCE(SUM(p.amount), 0) AS total
+         FROM (
+           SELECT date,shift FROM drives WHERE substr(date,1,7)=?
+           UNION
+           SELECT date,shift FROM passenger_entries WHERE substr(date,1,7)=?
+         ) days
+         LEFT JOIN drives d ON d.date=days.date AND d.shift=days.shift
+         LEFT JOIN passenger_entries p ON p.date=days.date AND p.shift=days.shift
+         GROUP BY days.date,days.shift,d.actual_driver
+         ORDER BY days.date DESC,
+                  CASE days.shift WHEN 'Ranní' THEN 1 WHEN 'Odpolední' THEN 2
+                       WHEN 'Noční' THEN 3 WHEN 'Sobota 12 h' THEN 4 ELSE 5 END`,
+        selectedMonth, selectedMonth
+      );
+      if (active) setMonthlyShifts(rows);
+    })().catch(() => { if (active) Alert.alert('Měsíční historie', 'Záznamy se nepodařilo načíst.'); });
+    return () => { active = false; };
+  }, [db, version, selectedMonth, mode]);
 
   const saveDriver = async () => {
-    await db.runAsync(
-      `INSERT INTO drives(date,shift,planned_driver,actual_driver,created_at)
-       VALUES(?,?,?,?,?) ON CONFLICT(date,shift) DO UPDATE SET planned_driver=excluded.planned_driver,actual_driver=excluded.actual_driver,created_at=excluded.created_at`,
-      dateKey, shift, plan, driverChoice, new Date().toISOString()
-    );
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    refresh();
+    try {
+      await db.runAsync(
+        `INSERT INTO drives(date,shift,planned_driver,actual_driver,created_at)
+         VALUES(?,?,?,?,?) ON CONFLICT(date,shift)
+         DO UPDATE SET planned_driver=excluded.planned_driver,
+                       actual_driver=excluded.actual_driver, created_at=excluded.created_at`,
+        dateKey, shift, plan, driverChoice, new Date().toISOString()
+      );
+      setActual(driverChoice);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      refresh();
+    } catch { Alert.alert('Uložení řidiče', 'Řidiče se nepodařilo uložit.'); }
   };
 
   const saveRetro = async () => {
+    if (retroSaving) return;
     const name = retroPassenger === 'Host' ? guestName.trim() : retroPassenger;
-    if (!name) return;
-    await db.runAsync(
-      `INSERT INTO passenger_entries(date,shift,passenger_name,fraction,amount,is_guest,is_retro,created_at)
-       VALUES(?,?,?,?,?,?,?,?)`,
-      dateKey, shift, name, retroFraction, retroFraction * PRICE_FULL, retroPassenger === 'Host' ? 1 : 0, 1, new Date().toISOString()
-    );
-    setGuestName(''); setRetroOpen(false); refresh();
+    if (!name) { Alert.alert('Jméno', 'Zadej jméno hosta.'); return; }
+    setRetroSaving(true);
+    try {
+      await db.runAsync(
+        `INSERT INTO passenger_entries(date,shift,passenger_name,fraction,amount,is_guest,is_retro,created_at)
+         VALUES(?,?,?,?,?,?,?,?)`,
+        dateKey, shift, name, retroFraction, retroFraction * PRICE_FULL,
+        retroPassenger === 'Host' ? 1 : 0, 1, new Date().toISOString()
+      );
+      setGuestName('');
+      setRetroOpen(false);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      refresh();
+    } catch { Alert.alert('Zpětný zápis', 'Záznam se nepodařilo uložit.'); }
+    finally { setRetroSaving(false); }
   };
+
+  const openDay = (date: string, selectedShift: ShiftName) => {
+    setDateKey(date);
+    setShift(selectedShift);
+    setMode('day');
+  };
+  const monthTotal = monthlyShifts.reduce((total, item) => total + Number(item.total || 0), 0);
+  const monthPassengers = monthlyShifts.reduce((total, item) => total + Number(item.passenger_count || 0), 0);
 
   return (
     <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
       <Text style={styles.bigTitle}>Přehled jízd</Text>
-      <Text style={styles.subtitle}>Konkrétní datum, směna a skutečný průběh</Text>
+      <Text style={styles.subtitle}>Historie jízd, směn a cestujících</Text>
 
       <GlassCard>
-        <View style={styles.dateNav}>
-          <Pressable onPress={() => setDateKey(addDays(dateKey, -1))} style={styles.navRound}><Text style={styles.navRoundText}>‹</Text></Pressable>
-          <View style={{ alignItems: 'center' }}><Text style={styles.heroTitle}>{czDate(dateKey)}</Text><Text style={styles.mutedMini}>{monthLabel(monthKey(dateKey))}</Text></View>
-          <Pressable onPress={() => setDateKey(addDays(dateKey, 1))} style={styles.navRound}><Text style={styles.navRoundText}>›</Text></Pressable>
+        <View style={styles.segmentRow}>
+          <Pressable onPress={() => setMode('day')}
+            style={[styles.segment, mode === 'day' && styles.segmentActive]}>
+            <Text style={[styles.segmentText, mode === 'day' && styles.activeSegmentText]}>Denní náhled</Text>
+          </Pressable>
+          <Pressable onPress={() => { setSelectedMonth(monthKey(dateKey)); setMode('month'); }}
+            style={[styles.segment, mode === 'month' && styles.segmentActive]}>
+            <Text style={[styles.segmentText, mode === 'month' && styles.activeSegmentText]}>Kompletní měsíc</Text>
+          </Pressable>
         </View>
-        <View style={styles.shiftRow}>{shiftOptions(dateKey).map((s) => <Pressable key={s} onPress={() => setShift(s)} style={[styles.shiftChip, shift === s && styles.shiftChipActive]}><Text style={styles.shiftChipText}>{s}</Text></Pressable>)}</View>
-      </GlassCard>
-
-      <GlassCard>
-        <Text style={styles.cardTitle}>Řízení</Text>
-        <View style={styles.infoRow}><Text style={styles.lineLabel}>Měl řídit</Text><Text style={styles.infoValue}>{plan}</Text></View>
-        <View style={styles.infoRow}><Text style={styles.lineLabel}>Skutečně řídil</Text><Text style={[styles.infoValue, { color: actual ? '#9af1ad' : '#969aa0' }]}>{actual ?? 'Nepotvrzeno'}</Text></View>
-        <SegmentedDrivers value={driverChoice} onChange={setDriverChoice} />
-        <CopperButton label="Uložit skutečného řidiče" onPress={saveDriver} />
-      </GlassCard>
-
-      <GlassCard>
-        <View style={styles.cardHeader}><Text style={styles.cardTitle}>Cestující</Text><Pressable onPress={() => setRetroOpen(true)}><Text style={styles.textLink}>＋ Zpětný zápis</Text></Pressable></View>
-        {entries.length === 0 ? <Text style={styles.emptyText}>Pro tuto směnu zatím není žádný záznam.</Text> : entries.map((e) => (
-          <View key={e.id} style={styles.entryRow}>
-            <View><Text style={styles.entryName}>{e.passenger_name}</Text><Text style={styles.mutedMini}>{e.is_retro ? 'zpětně · ' : ''}{e.fraction === 1 ? 'celá jízda' : 'půl jízdy'}</Text></View>
-            <Text style={styles.entryMoney}>{formatMoney(e.amount)}</Text>
+        {mode === 'day' ? <>
+          <View style={styles.dateNav}>
+            <Pressable accessibilityLabel="Předchozí den" onPress={() => setDateKey(addDays(dateKey, -1))} style={styles.navRound}><Text style={styles.navRoundText}>‹</Text></Pressable>
+            <View style={{ alignItems: 'center', flexShrink: 1 }}><Text style={styles.heroTitle}>{czDate(dateKey)}</Text><Text style={styles.mutedMini}>{monthLabel(monthKey(dateKey))}</Text></View>
+            <Pressable accessibilityLabel="Další den" onPress={() => setDateKey(addDays(dateKey, 1))} style={styles.navRound}><Text style={styles.navRoundText}>›</Text></Pressable>
           </View>
-        ))}
+          <View style={styles.shiftRow}>{shiftOptions(dateKey).map((s) => (
+            <Pressable key={s} onPress={() => setShift(s)} style={[styles.shiftChip, shift === s && styles.shiftChipActive]}><Text style={styles.shiftChipText}>{s}</Text></Pressable>
+          ))}</View>
+        </> : <>
+          <View style={styles.dateNav}>
+            <Pressable accessibilityLabel="Předchozí měsíc" onPress={() => setSelectedMonth(shiftMonth(selectedMonth, -1))} style={styles.navRound}><Text style={styles.navRoundText}>‹</Text></Pressable>
+            <Text style={styles.heroTitle}>{monthLabel(selectedMonth)}</Text>
+            <Pressable accessibilityLabel="Další měsíc" onPress={() => setSelectedMonth(shiftMonth(selectedMonth, 1))} style={styles.navRound}><Text style={styles.navRoundText}>›</Text></Pressable>
+          </View>
+        </>}
       </GlassCard>
+
+      {mode === 'day' ? <>
+        <GlassCard>
+          <Text style={styles.cardTitle}>Řízení</Text>
+          <View style={styles.infoRow}><Text style={styles.lineLabel}>Měl řídit</Text><Text style={styles.infoValue}>{plan}</Text></View>
+          <View style={styles.infoRow}><Text style={styles.lineLabel}>Skutečně řídil</Text><Text style={[styles.infoValue, { color: actual ? '#9af1ad' : '#969aa0' }]}>{actual ?? 'Nepotvrzeno'}</Text></View>
+          <SegmentedDrivers value={driverChoice} onChange={setDriverChoice} />
+          <CopperButton label="Uložit skutečného řidiče" onPress={saveDriver} disabled={actual === driverChoice} />
+        </GlassCard>
+        <GlassCard>
+          <View style={styles.cardHeader}><Text style={styles.cardTitle}>Cestující</Text><Pressable onPress={() => setRetroOpen(true)}><Text style={styles.textLink}>＋ Zpětný zápis</Text></Pressable></View>
+          {entries.length === 0 ? <Text style={styles.emptyText}>Pro tuto směnu zatím není žádný záznam.</Text> : entries.map((e) => (
+            <View key={e.id} style={styles.entryRow}>
+              <View><Text style={styles.entryName}>{e.passenger_name}</Text><Text style={styles.mutedMini}>{e.is_retro ? 'zpětně · ' : ''}{e.fraction === 1 ? 'celá jízda' : 'půl jízdy'}</Text></View>
+              <Text style={styles.entryMoney}>{formatMoney(e.amount)}</Text>
+            </View>
+          ))}
+        </GlassCard>
+      </> : <>
+        <GlassCard>
+          <Text style={styles.cardTitle}>Souhrn měsíce</Text>
+          <View style={styles.infoRow}><Text style={styles.lineLabel}>Zaznamenané směny</Text><Text style={styles.infoValue}>{monthlyShifts.length}</Text></View>
+          <View style={styles.infoRow}><Text style={styles.lineLabel}>Zápisy cestujících</Text><Text style={styles.infoValue}>{monthPassengers}</Text></View>
+          <Text style={styles.financeBig}>{formatMoney(monthTotal)}</Text>
+        </GlassCard>
+        <GlassCard>
+          <Text style={styles.cardTitle}>Všechny záznamy</Text>
+          {monthlyShifts.length === 0 ? <Text style={styles.emptyText}>V tomto měsíci zatím nejsou žádné jízdy ani potvrzené směny.</Text> : monthlyShifts.map((r, i) => (
+            <React.Fragment key={`${r.date}-${r.shift}`}>
+              {(i === 0 || monthlyShifts[i - 1].date !== r.date) && <Text style={styles.monthDayTitle}>{czDate(r.date)}</Text>}
+              <Pressable onPress={() => openDay(r.date, r.shift)} style={styles.monthTripRow} accessibilityLabel={`Otevřít ${czDate(r.date)} ${r.shift}`}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.entryName}>{r.shift}  ›</Text>
+                  <Text style={styles.mutedMini}>Řidič: {r.actual_driver ?? 'nepotvrzen'} · {Number(r.passenger_count)} zápisů</Text>
+                </View>
+                <Text style={styles.entryMoney}>{formatMoney(Number(r.total))}</Text>
+              </Pressable>
+            </React.Fragment>
+          ))}
+        </GlassCard>
+      </>}
 
       <Modal visible={retroOpen} transparent animationType="fade" onRequestClose={() => setRetroOpen(false)}>
         <View style={styles.modalShade}><GlassCard style={styles.modalCard}>
           <Text style={styles.cardTitle}>Zpětný zápis · {czDate(dateKey)}</Text>
           <View style={styles.segmentRow}>{['Hanes','Vorel','Host'].map((p) => <Pressable key={p} onPress={() => setRetroPassenger(p)} style={[styles.segment, retroPassenger === p && styles.segmentActive]}><Text style={styles.segmentText}>{p}</Text></Pressable>)}</View>
           {retroPassenger === 'Host' && <TextInput value={guestName} onChangeText={setGuestName} placeholder="Jméno hosta" placeholderTextColor="#777" style={styles.input} />}
-          <View style={styles.segmentRow}><Pressable onPress={() => setRetroFraction(1)} style={[styles.segment, retroFraction === 1 && styles.segmentActive]}><Text style={styles.segmentText}>90 Kč</Text></Pressable><Pressable onPress={() => setRetroFraction(0.5)} style={[styles.segment, retroFraction === 0.5 && styles.segmentActive]}><Text style={styles.segmentText}>45 Kč</Text></Pressable></View>
-          <CopperButton label="Uložit zpětně" onPress={saveRetro} />
-          <Pressable onPress={() => setRetroOpen(false)} style={styles.closeLink}><Text style={styles.closeLinkText}>Zrušit</Text></Pressable>
+          <View style={styles.segmentRow}>
+            <Pressable onPress={() => setRetroFraction(1)} style={[styles.segment, retroFraction === 1 && styles.segmentActive]}><Text style={styles.segmentText}>90 Kč</Text></Pressable>
+            <Pressable onPress={() => setRetroFraction(0.5)} style={[styles.segment, retroFraction === 0.5 && styles.segmentActive]}><Text style={styles.segmentText}>45 Kč</Text></Pressable>
+          </View>
+          <View style={styles.modalActions}>
+            <View style={styles.modalPrimaryAction}><CopperButton label={retroSaving ? 'Ukládám…' : 'Uložit zpětně'} onPress={saveRetro} compact disabled={retroSaving} /></View>
+            <Pressable disabled={retroSaving} onPress={() => setRetroOpen(false)} style={styles.modalCancelAction}><Text style={styles.closeLinkText}>Zrušit</Text></Pressable>
+          </View>
         </GlassCard></View>
       </Modal>
     </ScrollView>
@@ -636,6 +780,18 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#080a0d' },
+  driverWheelWrap: { width: 124, alignItems: 'center', justifyContent: 'center', paddingVertical: 3 },
+  driverWheelRing: { width: 112, height: 112, borderRadius: 56, borderWidth: 5, borderColor: '#a36b43', alignItems: 'center', justifyContent: 'center', backgroundColor: '#11141a', shadowColor: '#ff843b', shadowOpacity: 0.5, shadowRadius: 12 },
+  driverWheelCheck: { position: 'absolute', right: -2, bottom: -2, width: 27, height: 27, borderRadius: 14, backgroundColor: '#368456', borderWidth: 2, borderColor: '#c3efd0', justifyContent: 'center', alignItems: 'center' },
+  driverWheelCheckText: { color: '#fff', fontWeight: '900', fontSize: 16 },
+  driverWheelStatus: { color: '#d2a07e', fontSize: 9, fontWeight: '800', marginTop: 7, textAlign: 'center', letterSpacing: 0.7 },
+  driverWheelStatusConfirmed: { color: '#9af1ad' },
+  activeSegmentText: { color: '#fff' },
+  monthDayTitle: { color: '#ffb47f', fontWeight: '800', fontSize: 14, marginTop: 17, marginBottom: 4 },
+  monthTripRow: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 62, paddingVertical: 11, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: 'rgba(255,255,255,0.12)' },
+  modalActions: { width: '100%', marginTop: 9, gap: 11 },
+  modalPrimaryAction: { width: '100%', alignSelf: 'stretch' },
+  modalCancelAction: { minHeight: 48, paddingHorizontal: 14, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.16)', backgroundColor: 'rgba(255,255,255,0.04)', justifyContent: 'center', alignItems: 'center' },
   screenScroll: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 124, gap: 12 },
   headerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 2 },
   bigTitle: { color: '#fff', fontSize: 33, fontWeight: '800', letterSpacing: -1.1 },
