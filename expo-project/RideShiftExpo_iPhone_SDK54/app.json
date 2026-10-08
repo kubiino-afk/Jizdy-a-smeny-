@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Jízdy a směny",
+    "slug": "jizdy-a-smeny",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "icon": "./assets/icon.png",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "cz.kubiino.jizdyasmeny"
+    },
+    "plugins": [
+      "expo-sqlite",
+      "expo-image",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#080A0D"
+        }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,38 @@
+JÍZDY A SMĚNY – AKTUALIZACE ROZHRANÍ (Expo SDK 57)
+================================================
+
+Tento balíček upravuje aktuální App.tsx z GitHub repozitáře
+kubiino-afk/Jizdy-a-smeny- a zachovává databázi SQLite.
+
+ÚPRAVY
+- Denní / kompletní měsíční historie s přepínačem.
+- Měsíční přehled zahrnuje i potvrzené směny bez cestujících;
+  seskupuje záznamy podle dnů, ukazuje součty a otevře detail klepnutím.
+- V kartě Dnes se při výběru Já / Tade / Fany hned přepne avatar.
+- Zelené označení POTVRZENO po uložení řidiče; změna volby dovolí opravu.
+- Oddělené Uložit zpětně / Zrušit; totéž pro hosta.
+
+INSTALACE V CODESPACE NA IPHONU
+1. Stáhni soubor u.py do aplikace Soubory na iPhonu.
+2. V otevřeném Codespace v průzkumníku nahraj u.py do kořene
+   repozitáře Jizdy-a-smeny- (vedle App.js a složky expo-project).
+3. Otevři terminál v kořeni repozitáře a zadej:
+
+   python3 u.py
+
+4. Očekávaná zpráva: HOTOVO: aktualizován .../App.tsx
+5. V Source Control ulož změnu App.tsx do commitu a synchronizuj
+   s GitHubem. Nepoužívej 'Discard all changes'.
+6. Pokud je spuštěný Expo server, obnov aplikaci v Expo Go.
+
+POZNÁMKY
+- Před změnou se ukládá záloha mimo repozitář do
+  ~/.local/share/jizdy-backups/.
+- Skript neprovádí žádné smazání ani změnu databáze.
+- Opakované spuštění nic nepřepisuje.
+- Skript ověřuje originální úseky kódu; při neshodě končí bez zápisu.
+- Před skutečným užíváním je nutné ověřit chování na iPhonu.
+- Pokud po instalaci TypeScript nebo Expo hlásí chybu, pošli snímek.
+
+Zpětný zápis je úmyslně samostatnou akcí (nepodléhá 12hodinovému
+omezení běžných jízd). Cena zůstává 90/45 Kč.
