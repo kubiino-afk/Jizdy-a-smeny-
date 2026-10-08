@@ -34,6 +34,34 @@ export async function migrateDb(db: SQLiteDatabase) {
     );
   `);
 
+  // CALENDAR+STORNO V2: schema update without losing existing rides.
+  const cancelledColumn = await db.getFirstAsync<{ name: string }>(
+    "SELECT name FROM pragma_table_info('passenger_entries') WHERE name='is_cancelled'"
+  );
+  if (!cancelledColumn) await db.execAsync('ALTER TABLE passenger_entries ADD COLUMN is_cancelled INTEGER NOT NULL DEFAULT 0');
+  const cancelledAtColumn = await db.getFirstAsync<{ name: string }>(
+    "SELECT name FROM pragma_table_info('passenger_entries') WHERE name='cancelled_at'"
+  );
+  if (!cancelledAtColumn) await db.execAsync('ALTER TABLE passenger_entries ADD COLUMN cancelled_at TEXT');
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS weekly_driver_plans (
+      date TEXT NOT NULL,
+      work_group TEXT NOT NULL,
+      driver TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(date, work_group)
+    );
+    CREATE TABLE IF NOT EXISTS change_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT NOT NULL,
+      reference TEXT NOT NULL,
+      action TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+
   const anchor = await db.getFirstAsync<{ value: string }>("SELECT value FROM settings WHERE key='rotation_anchor_date'");
   if (!anchor) {
     await db.runAsync("INSERT INTO settings(key,value) VALUES('rotation_anchor_date','2026-10-03')");
@@ -73,7 +101,7 @@ export function monthKey(dateKey: string) {
 
 export function shiftOptions(dateKey: string): ShiftName[] {
   const day = parseDateKey(dateKey).getDay();
-  return day === 6 ? ['Sobota 12 h'] : ['Ranní', 'Odpolední', 'Noční'];
+  return day === 6 ? ['Ranní', 'Odpolední', 'Noční', 'Sobota 12 h'] : ['Ranní', 'Odpolední', 'Noční'];
 }
 
 export function plannedDriver(dateKey: string, anchorDateKey: string, anchorDriver: DriverName): DriverName {
@@ -100,7 +128,7 @@ export async function recordRegularPassenger(
      SELECT ?,?,?,?,?,0,0,?
      WHERE NOT EXISTS (
        SELECT 1 FROM passenger_entries
-       WHERE passenger_name=? AND is_guest=0 AND is_retro=0
+       WHERE passenger_name=? AND is_guest=0 AND is_retro=0 AND is_cancelled=0
          AND julianday(created_at) > julianday(?)
      )`,
     date, shift, name, fraction, amount, now.toISOString(),

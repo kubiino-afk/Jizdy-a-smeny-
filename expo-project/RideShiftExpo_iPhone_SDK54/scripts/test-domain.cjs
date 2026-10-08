@@ -54,3 +54,53 @@ test('retroactive and guest entries do not activate the regular lock', () => wit
   insert.run('2026-10-08', 'Ranní', 'Hanes', 1, 90, 1, 0, instant.toISOString());
   assert.equal(await save(db), true);
 }));
+
+// CALENDAR+STORNO V2 tests.
+const compiledCalendar = ts.transpileModule(readFileSync(join(__dirname, '../src/shiftCalendar.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS }
+}).outputText;
+const calendarContext = { exports: {} };
+vm.runInNewContext(compiledCalendar, calendarContext);
+const { workCodeForDate, workShiftName } = calendarContext.exports;
+const after = (key, n) => { const d = new Date(key + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+test('four work groups repeat exactly after 28 days', () => {
+  for (const g of ['A', 'B', 'C', 'D']) {
+    for (let delta = -365; delta <= 365; delta++) {
+      assert.equal(workCodeForDate(after('2026-10-05', delta), g),
+                   workCodeForDate(after('2026-10-05', delta + 28), g));
+    }
+  }
+});
+test('group A/B/C/D roster matches October 2026 screenshots', () => {
+  const examples = [
+    ['A', '2026-10-05', 'O'], ['A', '2026-10-12', 'R'], ['A', '2026-10-26', 'N'],
+    ['B', '2026-10-05', 'N'], ['B', '2026-10-12', 'O'], ['B', '2026-10-30', 'R'],
+    ['C', '2026-10-08', 'V'], ['C', '2026-10-09', 'R'], ['C', '2026-10-16', 'V'],
+    ['C', '2026-10-19', 'O'], ['C', '2026-10-23', 'O'], ['C', '2026-10-27', 'R'],
+    ['D', '2026-10-05', 'R'], ['D', '2026-10-09', 'N'], ['D', '2026-10-26', 'O'],
+  ];
+  for (const [g, d, code] of examples) assert.equal(workCodeForDate(d, g), code);
+});
+test('personal overtime is omitted from predicted C shift', () => {
+  for (const d of ['2026-09-18', '2026-10-16']) assert.equal(workCodeForDate(d, 'C'), 'V');
+  assert.equal(workCodeForDate('2026-10-01', 'C'), 'R');
+  assert.equal(workCodeForDate('2026-10-12', 'C'), 'N');
+  assert.equal(workCodeForDate('2026-10-19', 'C'), 'O');
+});
+test('Saturday work shift remains compatible with original DB', () => {
+  assert.equal(workShiftName('R', '2026-10-10'), 'Ranní');
+  assert.equal(workShiftName('N', '2026-10-10'), 'Noční');
+  assert.equal(workShiftName('V', '2026-10-10'), null);
+});
+test('cancelled entry stops locking passenger and is excluded from totals', () => withDb(async db => {
+  assert.equal(await save(db), true);
+  await db.runAsync("UPDATE passenger_entries SET is_cancelled=1,cancelled_at=? WHERE id=1", instant.toISOString());
+  assert.equal(await save(db), true);
+  const row = db.sql.prepare('SELECT COUNT(*) AS count,SUM(amount) AS total FROM passenger_entries WHERE is_cancelled=0').get();
+  assert.equal(row.count, 1); assert.equal(row.total, 45);
+}));
+test('migration preserves existing records on second initialization', () => withDb(async db => {
+  assert.equal(await save(db), true);
+  await migrateDb(db);
+  assert.equal(db.sql.prepare('SELECT COUNT(*) AS n FROM passenger_entries').get().n, 1);
+}));
