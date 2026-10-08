@@ -1,0 +1,32 @@
+{
+  "name": "jizdy-a-smeny",
+  "version": "0.1.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "start:tunnel": "expo start --tunnel",
+    "ios": "expo start --ios",
+    "doctor": "expo-doctor",
+    "start:codespace": "EXPO_PACKAGER_PROXY_URL=https://glorious-space-journey-gxrjw96x4vj9cp9pp-8081.app.github.dev expo start --go --localhost",
+    "test": "TZ=Europe/Prague node --test scripts/test-domain.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "expo": "^57.0.27",
+    "expo-blur": "~57.0.3",
+    "expo-haptics": "~57.0.3",
+    "expo-image": "~57.0.5",
+    "expo-linear-gradient": "~57.0.2",
+    "expo-splash-screen": "~57.0.9",
+    "expo-sqlite": "~57.0.4",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3",
+    "@types/react": "~19.2.4",
+    "typescript": "~6.0.3"
+  }
+}

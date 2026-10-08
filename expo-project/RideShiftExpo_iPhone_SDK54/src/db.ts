@@ -24,7 +24,7 @@ export async function migrateDb(db: SQLiteDatabase) {
     CREATE TABLE IF NOT EXISTS passenger_entries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       date TEXT NOT NULL,
-      shift TEXT NOT NULL,o
+      shift TEXT NOT NULL,
       passenger_name TEXT NOT NULL,
       fraction REAL NOT NULL,
       amount REAL NOT NULL,
@@ -78,8 +78,33 @@ export function shiftOptions(dateKey: string): ShiftName[] {
 
 export function plannedDriver(dateKey: string, anchorDateKey: string, anchorDriver: DriverName): DriverName {
   const drivers: DriverName[] = ['Já', 'Tade', 'Fany'];
-  const days = Math.floor((parseDateKey(dateKey).getTime() - parseDateKey(anchorDateKey).getTime()) / 86400000);
+  // Calendar days must not change when daylight saving time starts or ends.
+  const dayNumber = (key: string) => {
+    const date = parseDateKey(key);
+    return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000;
+  };
+  const days = dayNumber(dateKey) - dayNumber(anchorDateKey);
   const week = Math.floor(days / 7);
   const base = drivers.indexOf(anchorDriver);
   return drivers[((base + week) % drivers.length + drivers.length) % drivers.length];
+}
+
+// One atomic statement enforces the lock even if two taps arrive together.
+export async function recordRegularPassenger(
+  db: SQLiteDatabase, date: string, shift: ShiftName,
+  name: 'Hanes' | 'Vorel', fraction: number, amount: number,
+  lockMs: number, now = new Date()
+): Promise<boolean> {
+  const result = await db.runAsync(
+    `INSERT INTO passenger_entries(date,shift,passenger_name,fraction,amount,is_guest,is_retro,created_at)
+     SELECT ?,?,?,?,?,0,0,?
+     WHERE NOT EXISTS (
+       SELECT 1 FROM passenger_entries
+       WHERE passenger_name=? AND is_guest=0 AND is_retro=0
+         AND julianday(created_at) > julianday(?)
+     )`,
+    date, shift, name, fraction, amount, now.toISOString(),
+    name, new Date(now.getTime() - lockMs).toISOString()
+  );
+  return result.changes > 0;
 }
